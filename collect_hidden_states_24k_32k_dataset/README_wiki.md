@@ -51,7 +51,65 @@
   - 视资源调整并发（如 `CONCURRENCY=2`）
   - 适当提高重试上限（如 `MAX_RETRIES=8`, `MAX_CONSECUTIVE_ERRORS=20`）
 
-## 7. Git 提交流程（当前提交分支）
+## 7. 更详细数据流图（Mermaid）
+
+```mermaid
+flowchart TD
+    A["raw dataset<br>/mnt/sfs_turbo/dataset/hugging-face/long_context_24k/long_sft_24k_64k.jsonl"] --> B["extract_24k_32k_jsonl.py"]
+
+    subgraph "Step 1: 抽取 24k-32k"
+      B --> B1["逐条加载 JSONL 记录"]
+      B1 --> B2["tokenizer 编码<br/>计算 token 长度"]
+      B2 --> B3{"24576 <= token_len <= 32768?"}
+      B3 -->|否| B4["丢弃样本<br/>drop 计数"]
+      B3 -->|是| B5["写入 long_sft_24k_32k.jsonl"]
+    end
+
+    B5 --> C["prepare_long_sft_24k_32k_dataset.sh"]
+
+    subgraph "Step 2: 转 HF dataset"
+      C --> C1["读取 long_sft_24k_32k.jsonl"]
+      C1 --> C2["构建 Dataset 对象"]
+      C2 --> C3["写入 hf_dataset_glm52_24k_32k"]
+      C3 --> C4["生成 hf_dataset_glm52_24k_32k/metadata + index"]
+    end
+
+    C4 --> D["start_glm5.2_hidden_states_24_32k.sh"]
+    D --> D1["设置服务参数<br/>endpoint=127.0.0.1:8000/v1<br/>MAX_MODEL_LEN=40000<br/>MAX_NUM_BATCHED_TOKENS=40000"]
+    D1 --> D2["调用 collect_glm5.2_hidden_states_24_32k.sh <MAX_SAMPLES>"]
+
+    subgraph "Step 3: hidden-states 收集调度"
+      D2 --> E["加载 HF dataset"]
+      E --> E1["扫描 hidden_states 输出目录"]
+      E1 --> E2["已有 hs_<index>.safetensors 跳过（续跑）"]
+      E1 --> E3["形成待处理样本列表"]
+      E3 --> E4["按 CONCURRENCY 并发提交请求"]
+    end
+
+    E4 --> F["vLLM /data_generation_offline API"]
+    F --> F1{"返回状态"}
+    F1 -->|成功| G["data_generation_offline.py 解析 hidden states"]
+    F1 -->|网络/连接/超时| H["重试控制"]
+
+    subgraph "Step 4: 重试逻辑"
+      H --> H1["MAX_RETRIES=3 => 最多 4 次尝试"]
+      H1 --> H2["指数退避 + 2 秒等待"]
+      H2 --> H3{"是否超 MAX_CONSECUTIVE_ERRORS?"}
+      H3 -->|否| F
+      H3 -->|是| H4["中断任务/返回失败"]
+    end
+
+    G --> I["可选 validate outputs"]
+    I --> J["写入 safetensors 文件"]
+    J --> J1[".../hidden_states_native_fp4/hs_<index>.safetensors"]
+    J1 --> K["统计 ok/err/rps"]
+    K --> L["日志：Saved N new data points"]
+    L --> M["Data generation complete"]
+
+    H4 --> N["根据策略人工补跑/修改参数"]
+```
+
+## 8. Git 提交流程（当前提交分支）
 - 分支：`feat/collect-hidden-states-24k-32k`
 - 提交：`97e8811`
 - 仓库：`https://github.com/nanxingMy/speculators_hw.git`
