@@ -17,7 +17,7 @@ from transformers import LlamaConfig, PretrainedConfig
 from transformers.models.auto.configuration_auto import AutoConfig
 from transformers.models.qwen3.configuration_qwen3 import Qwen3Config
 
-from hs_connectors import HiddenStatesBackend
+from hs_connectors import FileTransfer, HiddenStatesBackend
 from speculators.model import SpeculatorModel
 from speculators.models.eagle3.data import shift_batch
 from speculators.models.eagle3.rotary_partial import install_partial_neox_rotary
@@ -682,6 +682,13 @@ def main(cfg: TrainConfig):  # noqa: C901
     # than the plugin depending on pydantic. test_backend_reconciliation.py keeps
     # the mirror complete so nothing read here was dropped during resolution.
     transfer = backend_cls.from_train_args(args, args.data_path)
+    hs_prefetch_path = None
+    if args.hs_prefetch_batches:
+        if not isinstance(transfer, FileTransfer):
+            raise ValueError("HS prefetch requires the file hidden-states backend")
+        if args.on_missing != "raise":
+            raise ValueError("HS prefetch requires --on-missing raise")
+        hs_prefetch_path = transfer.hidden_states_path
 
     train_loader, val_loader = create_train_val_loaders(
         data_path=args.data_path,
@@ -702,6 +709,9 @@ def main(cfg: TrainConfig):  # noqa: C901
         num_workers=args.num_workers,
         prefetch_factor=args.prefetch_factor,
         preprocess=preprocess,
+        hs_prefetch_path=hs_prefetch_path,
+        hs_prefetch_batches=args.hs_prefetch_batches,
+        hs_prefetch_workers=args.hs_prefetch_workers,
         train_data_ratio=args.train_data_ratio,
     )
 

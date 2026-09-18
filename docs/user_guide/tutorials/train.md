@@ -469,6 +469,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --standalone --nproc_per_node 4 \
   --on-missing raise
 ```
 
+
 ///
 
 /// tab | P-EAGLE
@@ -590,6 +591,21 @@ speculators stitch-mtp \
 
 - `--hidden-states-path` - Points to the hidden states cached in Step 3
 - `--on-missing raise` - Fail if any hidden states are missing (recommended). Alternatives are `skip` and `warn`, which both skip the missing sample, with the latter raising a warning.
+
+For HS files on an rclone mount, set `--hidden-states-path` to the mounted
+directory and add `--hs-prefetch-batches 64 --hs-prefetch-workers 4` to the
+training command. The sampler reads upcoming files through the mount before
+DataLoader workers consume them. The window advances automatically as batches
+are dispatched, including after each epoch reshuffle and during validation.
+This fills rclone's disk cache when mounted with `--vfs-cache-mode full`.
+The first window starts prewarming during model and optimizer setup; training
+waits for any unfinished files before the first batch.
+With the default 12 DataLoader workers and prefetch factor 4, a window of
+64 batches covers the initial 48-batch DataLoader dispatch.
+Choose a window that fits within the VFS cache alongside DataLoader's in-flight
+batches. Rclone can still evict warmed files under its size and age limits.
+See [Offline HS prewarming and rolling reads](offline_hs_prefetch_flow.md)
+for the full flow diagram.
 
 ////
 

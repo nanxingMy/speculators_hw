@@ -27,6 +27,7 @@ Adapted from https://github.com/imoneoi/multipack_sampler.
 # Standard
 import warnings
 from heapq import heapreplace
+from pathlib import Path
 from typing import NamedTuple
 
 import numpy as np
@@ -34,6 +35,8 @@ import numpy as np
 # Third Party
 from numpy.typing import ArrayLike, NDArray
 from torch.utils.data import Sampler
+
+from speculators.train.hs_prefetch import iter_prefetched_batches
 
 
 ## Multipack Distributed Batch Sampler
@@ -172,6 +175,10 @@ class MultipackDistributedBatchSamplerV2(Sampler):
         truncate_long_samples: bool = True,
         seed: int = 0,
         max_batches: int | None = None,
+        hs_prefetch_path: Path | None = None,
+        hs_prefetch_batches: int = 0,
+        hs_prefetch_workers: int = 4,
+        hs_prefetch_file_index_offset: int = 0,
     ):
         """Efficient distributed packing sampler for linear attention style models
 
@@ -193,6 +200,14 @@ class MultipackDistributedBatchSamplerV2(Sampler):
         self.epoch = 0
         self.batch_max_length = batch_max_length
         self.max_batches = max_batches
+        self.hs_prefetch_path = hs_prefetch_path
+        self.hs_prefetch_batches = hs_prefetch_batches
+        self.hs_prefetch_workers = hs_prefetch_workers
+        self.hs_prefetch_file_index_offset = hs_prefetch_file_index_offset
+        self._prewarmed_epoch = -1
+        self._prewarmed_batch_count = 0
+        if hs_prefetch_batches > 0 and hs_prefetch_path is None:
+            raise ValueError("hs_prefetch_path is required when prefetch is enabled")
         self.lengths = np.array(lengths)
 
         self.valid_indices = np.nonzero(self.lengths <= self.batch_max_length)[0]
@@ -219,7 +234,28 @@ class MultipackDistributedBatchSamplerV2(Sampler):
 
     def __iter__(self):
         batches = self._generate_batches(self.epoch)
+        if self.hs_prefetch_batches:
+            assert self.hs_prefetch_path is not None
+            prewarmed = (
+                self._prewarmed_batch_count
+                if self._prewarmed_epoch == self.epoch
+                else 0
+            )
+            self._prewarmed_batch_count = 0
+            self._prewarmed_epoch = -1
+            return iter_prefetched_batches(
+                batches,
+                self.hs_prefetch_path,
+                self.hs_prefetch_batches,
+                self.hs_prefetch_workers,
+                self.hs_prefetch_file_index_offset,
+                prewarmed_prefix=prewarmed,
+            )
         return iter(batches)
+
+    def mark_initial_prewarmed(self, epoch: int, batch_count: int) -> None:
+        self._prewarmed_epoch = epoch
+        self._prewarmed_batch_count = batch_count
 
     def __len__(self):
         batches = self._generate_batches(self.epoch)

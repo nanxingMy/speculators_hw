@@ -2,6 +2,7 @@ import json
 import logging
 import time
 import warnings
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Literal, NamedTuple
 
@@ -32,7 +33,11 @@ from speculators.train.distributed import (
     get_rank,
     is_distributed,
 )
+from speculators.train.distributed_batch_sampler import (
+    MultipackDistributedBatchSamplerV2,
+)
 from speculators.train.graceful_shutdown import with_graceful_shutdown
+from speculators.train.hs_prefetch import warm_initial_batches
 from speculators.train.optimizers import build_optimizers
 from speculators.train.recovery import BatchRecoveryCoordinator
 from speculators.train.utils import normalize_counted_metrics
@@ -223,9 +228,75 @@ class Trainer:
         )
         self.checkpointer: BaseCheckpointer = checkpointer_class(self.config.save_path)
 
+        self._initial_hs_executor: ThreadPoolExecutor | None = None
+        self._initial_hs_future: Future[None] | None = None
+        self._initial_hs_batch_count = 0
         self.setup_trainer()
-        self.setup_model()
-        self.setup_optimizer()
+        self._start_initial_hs_prefetch()
+        try:
+            self.setup_model()
+            self.setup_optimizer()
+        except BaseException:
+            self._close_initial_hs_prefetch()
+            raise
+
+    def _start_initial_hs_prefetch(self) -> None:
+        sampler = self.train_loader.batch_sampler
+        if (
+            not isinstance(sampler, MultipackDistributedBatchSamplerV2)
+            or sampler.hs_prefetch_batches == 0
+            or self.current_epoch >= self.config.num_epochs
+        ):
+            return
+        assert sampler.hs_prefetch_path is not None
+        batches = sampler._generate_batches(self.current_epoch)
+        skip_steps = getattr(self, "_resume_local_step", 0)
+        prefix = batches[skip_steps : skip_steps + sampler.hs_prefetch_batches]
+        if not prefix:
+            return
+        self._initial_hs_batch_count = len(prefix)
+        self._initial_hs_started_at = time.perf_counter()
+        self._initial_hs_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="hs-startup"
+        )
+        self._initial_hs_future = self._initial_hs_executor.submit(
+            warm_initial_batches,
+            prefix,
+            sampler.hs_prefetch_path,
+            sampler.hs_prefetch_workers,
+            sampler.hs_prefetch_file_index_offset,
+        )
+        root_logger.info(
+            "Prewarming %d initial HS batches for epoch %d during model setup",
+            len(prefix),
+            self.current_epoch,
+        )
+
+    def _close_initial_hs_prefetch(self) -> None:
+        if self._initial_hs_executor is not None:
+            self._initial_hs_executor.shutdown(wait=False, cancel_futures=True)
+            self._initial_hs_executor = None
+
+    def _wait_initial_hs_prefetch(self) -> None:
+        future = self._initial_hs_future
+        if future is None:
+            return
+        start = time.perf_counter()
+        try:
+            future.result()
+            sampler = self.train_loader.batch_sampler
+            if isinstance(sampler, MultipackDistributedBatchSamplerV2):
+                sampler.mark_initial_prewarmed(
+                    self.current_epoch, self._initial_hs_batch_count
+                )
+        finally:
+            self._close_initial_hs_prefetch()
+            self._initial_hs_future = None
+        root_logger.info(
+            "Initial HS prewarm complete in %.2fs; waited %.2fs after model setup",
+            time.perf_counter() - self._initial_hs_started_at,
+            time.perf_counter() - start,
+        )
 
     def _training_state_path(self, epoch: int) -> Path:
         return self.checkpointer.path / str(epoch) / "training_state.json"
@@ -480,6 +551,8 @@ class Trainer:
 
         # Determine how many batches to skip for mid-epoch resume.
         skip_steps = self._prepare_resume_skip(epoch)
+        if epoch == self.current_epoch:
+            self._wait_initial_hs_prefetch()
 
         train_loader = self.train_loader
         if self.rank == 0:

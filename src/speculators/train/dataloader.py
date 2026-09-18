@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import logging
+import os
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-
-import os
 
 import torch
 from torch.utils.data import DataLoader
@@ -58,6 +58,9 @@ def _setup_dataloader(
     prefetch_factor: int | None = 4,
     preprocess: Callable[[BatchType], BatchType] | None = None,
     max_batches: int | None = None,
+    hs_prefetch_path: Path | None = None,
+    hs_prefetch_batches: int = 0,
+    hs_prefetch_workers: int = 4,
 ) -> DataLoader:
     batch_sampler = MultipackDistributedBatchSamplerV2(
         batch_max_length=total_seq_len,
@@ -65,6 +68,10 @@ def _setup_dataloader(
         num_replicas=get_dp_size(),
         rank=get_dp_rank(),
         max_batches=max_batches,
+        hs_prefetch_path=hs_prefetch_path,
+        hs_prefetch_batches=hs_prefetch_batches,
+        hs_prefetch_workers=hs_prefetch_workers,
+        hs_prefetch_file_index_offset=getattr(dataset, "start_file_idx", 0),
     )
     use_workers = num_workers > 0
     return DataLoader(
@@ -108,6 +115,9 @@ def create_train_val_loaders(
     preprocess: Callable[[BatchType], BatchType] | None,
     train_data_ratio: float = 0.9,
     max_train_batches: int | None = None,
+    hs_prefetch_path: Path | None = None,
+    hs_prefetch_batches: int = 0,
+    hs_prefetch_workers: int = 4,
 ) -> tuple[DataLoader, DataLoader]:
     """Create training and validation DataLoaders.
 
@@ -164,6 +174,9 @@ def create_train_val_loaders(
         prefetch_factor=prefetch_factor,
         preprocess=preprocess,
         max_batches=max_train_batches,
+        hs_prefetch_path=hs_prefetch_path,
+        hs_prefetch_batches=hs_prefetch_batches,
+        hs_prefetch_workers=hs_prefetch_workers,
     )
     val_loader = _setup_dataloader(
         val_dataset,
@@ -173,6 +186,9 @@ def create_train_val_loaders(
         num_workers=num_workers,
         prefetch_factor=prefetch_factor,
         preprocess=preprocess,
+        hs_prefetch_path=hs_prefetch_path,
+        hs_prefetch_batches=hs_prefetch_batches,
+        hs_prefetch_workers=hs_prefetch_workers,
     )
 
     return train_loader, val_loader
