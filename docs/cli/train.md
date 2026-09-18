@@ -234,7 +234,7 @@ All speculator types (except `mtp`) use sliding window attention on all draft la
 
 - **`--prefetch-factor`** (int, default: `4`) Number of batches to prefetch per worker.
 
-- **`--hs-prefetch-batches`** (int, default: `0`) Read this many upcoming batches through the mounted HS directory before DataLoader workers consume them. Requires the file backend and `--on-missing raise`. Zero disables prewarming.
+- **`--hs-prefetch-batches`** (int, default: `0`) Maximum number of upcoming batches to prefetch through the mounted HS directory. Startup waits for only the first batch; later batches are read in the background and each is dispatched when ready. Requires the file backend and `--on-missing raise`. Zero disables prewarming.
 
 - **`--hs-prefetch-workers`** (int, default: `4`) Number of parallel HS cache readers, separate from DataLoader workers.
 

@@ -2,6 +2,7 @@
 
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from threading import Event
 from pathlib import Path
 from types import SimpleNamespace
@@ -26,6 +27,31 @@ class HiddenStatePrefetchTests(unittest.TestCase):
             batches = [np.array([0]), np.array([1])]
             result = list(iter_prefetched_batches(batches, root, 1, 2, 10))
             self.assertEqual([batch.tolist() for batch in result], [[0], [1]])
+
+    def test_rolling_prefetch_yields_ready_batch_without_full_window(self):
+        blocked = Event()
+        release = Event()
+        batches = [np.array([0]), np.array([1]), np.array([2])]
+
+        def warm(batch, _root, _offset):
+            if int(batch[0]) == 2:
+                blocked.set()
+                if not release.wait(3):
+                    raise TimeoutError("later batch remained blocked")
+
+        with patch("speculators.train.hs_prefetch._warm_batch", side_effect=warm):
+            stream = iter_prefetched_batches(
+                batches, Path("/unused"), 2, 2, prewarmed_prefix=1
+            )
+            try:
+                self.assertEqual(next(stream).tolist(), [0])
+                self.assertTrue(blocked.wait(2))
+                with ThreadPoolExecutor(max_workers=1) as caller:
+                    ready = caller.submit(next, stream)
+                    self.assertEqual(ready.result(timeout=2).tolist(), [1])
+            finally:
+                release.set()
+            self.assertEqual(next(stream).tolist(), [2])
 
     def test_missing_file_is_reported_before_batch_is_yielded(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -66,14 +92,14 @@ class HiddenStatePrefetchTests(unittest.TestCase):
             rows = [batch.tolist() for batch in loader]
         self.assertEqual(sum(len(row) for row in rows), 4)
 
-    def test_startup_prefetch_runs_during_model_setup(self):
+    def test_startup_prefetch_warms_one_batch_during_model_setup(self):
         sampler = MultipackDistributedBatchSamplerV2(
             batch_max_length=2,
             lengths=[1] * 4,
             num_replicas=1,
             rank=0,
             hs_prefetch_path=Path("/unused"),
-            hs_prefetch_batches=2,
+            hs_prefetch_batches=16,
             hs_prefetch_workers=1,
         )
         trainer = Trainer.__new__(Trainer)
@@ -102,7 +128,7 @@ class HiddenStatePrefetchTests(unittest.TestCase):
             finally:
                 release.set()
             trainer._wait_initial_hs_prefetch()
-        self.assertEqual(sampler._prewarmed_batch_count, 2)
+        self.assertEqual(sampler._prewarmed_batch_count, 1)
 
     def test_startup_prefetch_uses_remaining_batches_on_resume(self):
         sampler = MultipackDistributedBatchSamplerV2(
@@ -126,14 +152,14 @@ class HiddenStatePrefetchTests(unittest.TestCase):
             trainer._start_initial_hs_prefetch()
             trainer._wait_initial_hs_prefetch()
 
-        expected = sampler._generate_batches(1)[1:3]
+        expected = sampler._generate_batches(1)[1:2]
         actual = warm.call_args.args[0]
         self.assertEqual(
             [item.tolist() for item in actual],
             [item.tolist() for item in expected],
         )
         self.assertIsNone(trainer._initial_hs_future)
-        self.assertEqual(sampler._prewarmed_batch_count, 2)
+        self.assertEqual(sampler._prewarmed_batch_count, 1)
 
         # The resume path slices skipped batches before DataLoader iteration.
         all_batches = sampler._generate_batches(1)
@@ -142,7 +168,7 @@ class HiddenStatePrefetchTests(unittest.TestCase):
         with patch("speculators.train.hs_prefetch._warm_batch") as read:
             remaining = [batch.tolist() for batch in sampler]
         self.assertEqual(remaining, [batch.tolist() for batch in all_batches[1:]])
-        self.assertEqual(read.call_count, 1)
+        self.assertEqual(read.call_count, 2)
         self.assertEqual(read.call_args.args[0].tolist(), all_batches[-1].tolist())
 
     def test_sampler_uses_new_epoch_order(self):

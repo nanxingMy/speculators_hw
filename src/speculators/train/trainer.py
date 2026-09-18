@@ -251,7 +251,9 @@ class Trainer:
         assert sampler.hs_prefetch_path is not None
         batches = sampler._generate_batches(self.current_epoch)
         skip_steps = getattr(self, "_resume_local_step", 0)
-        prefix = batches[skip_steps : skip_steps + sampler.hs_prefetch_batches]
+        # Only the first batch blocks startup. The sampler rolls the remaining
+        # batches through its bounded prefetch window while training proceeds.
+        prefix = batches[skip_steps : skip_steps + 1]
         if not prefix:
             return
         self._initial_hs_batch_count = len(prefix)

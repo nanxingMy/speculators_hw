@@ -21,11 +21,11 @@ flowchart TD
     C --> I["torchrun 启动离线训练"]
     H1 --> I
     I --> J["sampler 按 epoch 和 rank 确定 batch，并接入预热窗口"]
-    J --> K["首段预热：后台线程读取最初 N 个 batch 的 HS"]
+    J --> K["首次预热：后台线程读取首个 batch 的 HS"]
     J --> L["同时初始化训练模型与优化器"]
-    K --> M["首段完成后才开始 DataLoader 迭代"]
+    K --> M["首个 batch 读完后开始 DataLoader 迭代"]
     L --> M
-    M --> N["滚动预热：后台读取后续 N 个 batch"]
+    M --> N["滚动预热：后台最多读取后续 N 个 batch"]
     N --> O["当前 batch 预热完成，交给 DataLoader worker"]
     O --> P["按编号读取 hs_i.safetensors，核对 token_ids"]
     P --> Q["组装 batch 并训练一步"]
@@ -52,7 +52,7 @@ sequenceDiagram
 
     Note over T,D: 本分支新增：首段预热、滚动窗口、派发前等待
     T->>T: 读取断点状态，确定本轮和待训练的首个 batch
-    T->>P: 提交首段 N 个 batch 的 HS 编号
+    T->>P: 提交首个 batch 的 HS 编号
     par 模型初始化
         T->>T: 初始化模型、优化器及训练状态
     and 首段预热
@@ -73,14 +73,14 @@ sequenceDiagram
     end
 ~~~
 
-预热窗口按 batch 数量控制，由 --hs-prefetch-batches 设置；并发线程数由 --hs-prefetch-workers 设置。窗口随着 DataLoader 请求新 batch 自动前移。断点续训会跳过已经完成的 batch；验证集文件编号会加上训练集与验证集切分时的偏移。
+首次只等 1 个 batch 的 HS；--hs-prefetch-batches 控制后续滚动预热的最大窗口，并发线程数由 --hs-prefetch-workers 设置。每个 batch 读完即可派发，无需等整个窗口读完。窗口随着 DataLoader 请求新 batch 自动前移。断点续训会跳过已经完成的 batch；验证集文件编号会加上训练集与验证集切分时的偏移。
 
 ## rclone 缓存边界
 
 - 使用 --vfs-cache-mode full 时，预热器通过挂载目录把文件读到末尾，已读取的数据进入 rclone 的本地 VFS 磁盘缓存。
 - --vfs-cache-max-size 500G 和 --vfs-cache-max-age 24h 仍可能使文件被淘汰。预热表示训练前已读过，不能锁定文件在缓存中；若被淘汰，DataLoader 会通过挂载目录重新从 OBS 读取。
 - 冷缓存首次从 OBS 下载需要时间。首段预热与模型初始化并行；若模型初始化先结束，训练会等待剩余预热完成。日志会分别记录预热总时间和初始化后的等待时间。
-- 默认 DataLoader 有 12 个 worker、每个 worker 预取 4 个 batch。首段窗口设为 64 个 batch 时，可覆盖启动时约 48 个 batch 的派发。实际窗口大小应按 HS 文件总大小、500G 缓存容量及 OBS 带宽调整。
+- 默认 DataLoader 有 12 个 worker、每个 worker 预取 4 个 batch。滚动窗口设为 64 个 batch 时，最多可覆盖约 48 个 batch 的初始派发；首次启动仍只等待首个 batch。实际窗口大小应按 HS 文件总大小、500G 缓存容量及 OBS 带宽调整。
 - 若 OBS 持续读取速度低于训练消耗 HS 的速度，滚动预热也会被追上，训练会等待数据。
 
 ## 启用示例

@@ -598,8 +598,9 @@ training command. The sampler reads upcoming files through the mount before
 DataLoader workers consume them. The window advances automatically as batches
 are dispatched, including after each epoch reshuffle and during validation.
 This fills rclone's disk cache when mounted with `--vfs-cache-mode full`.
-The first window starts prewarming during model and optimizer setup; training
-waits for any unfinished files before the first batch.
+The first batch starts prewarming during model and optimizer setup; training
+waits only for that batch before starting. Up to the configured number of later
+batches are prefetched in the background, and each is dispatched when ready.
 With the default 12 DataLoader workers and prefetch factor 4, a window of
 64 batches covers the initial 48-batch DataLoader dispatch.
 Choose a window that fits within the VFS cache alongside DataLoader's in-flight

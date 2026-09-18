@@ -229,8 +229,9 @@ class DataArgs(_Group):
     hs_prefetch_batches: int = Field(
         default=0,
         ge=0,
-        description="Number of future batches to read through the mounted HS path. "
-        "Zero disables rolling HS cache prewarming.",
+        description="Maximum number of future batches to read through the "
+        "mounted HS path. Startup waits for one batch; later batches are "
+        "prefetched in the background. Zero disables HS cache prewarming.",
     )
     hs_prefetch_workers: int = Field(
         default=4,
