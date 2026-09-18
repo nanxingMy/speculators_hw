@@ -2,6 +2,8 @@
 
 本文对应仓库当前实现：HS 文件存放在 OBS，通过 rclone mount 暴露为宿主机目录；训练使用 file backend 和 --on-missing raise。预热器只读取挂载目录中的文件，不调用 rclone copy，也不生成新的 HS。
 
+> **本分支修改范围**：下图中黄色边框节点是 `feat/rclone-hs-prefetch` 新增或改动的离线训练逻辑。`generate-offline-data` 生成 HS、上传 OBS 和 rclone mount 是已有流程或外部准备步骤，不属于本分支的代码修改。当前仅推送了代码分支，尚未创建 PR。
+
 ## 全流程
 
 ~~~mermaid
@@ -15,9 +17,10 @@ flowchart TD
     E --> F["HS 文件存入 OBS"]
     F --> G["rclone mount：OBS 映射到宿主机目录"]
     G --> H["训练参数 --hidden-states-path 指向挂载目录"]
+    H --> H1["新增参数：--hs-prefetch-batches / --hs-prefetch-workers"]
     C --> I["torchrun 启动离线训练"]
-    H --> I
-    I --> J["sampler 按 epoch 和 rank 确定 batch 及样本编号"]
+    H1 --> I
+    I --> J["sampler 按 epoch 和 rank 确定 batch，并接入预热窗口"]
     J --> K["首段预热：后台线程读取最初 N 个 batch 的 HS"]
     J --> L["同时初始化训练模型与优化器"]
     K --> M["首段完成后才开始 DataLoader 迭代"]
@@ -28,8 +31,11 @@ flowchart TD
     P --> Q["组装 batch 并训练一步"]
     Q --> R{"本轮还有 batch？"}
     R -- "有" --> N
-    R -- "没有" --> S["验证集按自身编号顺序读取；进入下一 epoch 时重新洗牌"]
+    R -- "没有" --> S["验证集也按自身编号滚动预热；下一 epoch 重新洗牌"]
     S --> J
+
+    classDef changed fill:#fff2b3,stroke:#d97706,stroke-width:3px,color:#111827;
+    class H1,J,K,M,N,O,S changed;
 ~~~
 
 vLLM 只参与离线 HS 生成阶段。预先生成完整 HS 后，离线训练读取文件；--on-missing raise 会在文件缺失时报错。
@@ -44,6 +50,7 @@ sequenceDiagram
     participant O as OBS
     participant D as DataLoader worker
 
+    Note over T,D: 本分支新增：首段预热、滚动窗口、派发前等待
     T->>T: 读取断点状态，确定本轮和待训练的首个 batch
     T->>P: 提交首段 N 个 batch 的 HS 编号
     par 模型初始化
